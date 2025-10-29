@@ -22,7 +22,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 // ————— Account setup —————
-const privateKey: Hex = process.env.PRIVATE_KEY as Hex || "0x";
+const privateKey: Hex = (process.env.PRIVATE_KEY as Hex) || "0x";
 const account = privateKeyToAccount(privateKey);
 
 // ————— API key setup —————
@@ -46,8 +46,8 @@ const sourceTokenAmount = parseUnits("0.01", 6); // amount to send with 6 decima
 
 // ————— Destination Token config —————
 const destinationTokenAddress = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"; // USDC token
-const destinationTokenAmount = parseUnits("0.01", 6); // amount to send with 6 decimals for USDC token
-const extendedUpperBoundTimestamp = Math.floor(Date.now() / 1000) * (20 * 60); // 20 minutes
+const minimumExpectedDestinationTokenAmount = parseUnits("0.01", 6); // amount to send with 6 decimals for USDC token
+const extendedUpperBoundTimestamp = Math.floor(Date.now() / 1000) + 22 * 60; // 22 minutes
 
 // ————— Client config —————
 const client = createWalletClient({
@@ -61,9 +61,12 @@ const sleep = (ms: number) => {
 };
 
 const main = async () => {
+  // TODO: This needs to be fetched from getOrchestratorAddresses endpoint
+  const orchestratorAddress = "0xC9540b320111bCBa149436533fc34Da9004b8bad";
+
   const receiverBytes = encodeAbiParameters(
     [{ type: "address" }],
-    [account.address]
+    [orchestratorAddress]
   );
 
   // ————— Build CCIP message —————
@@ -82,44 +85,65 @@ const main = async () => {
   );
 
   // ————— Get CCIP message fees and token rate infos —————
-  const [tokenPrice, ethPrice, sourceTokenDecimals, ccipFeeAmount] =
-    await Promise.all([
-      getTokenPriceUSDById(tokenId, coinmarketcapApiKey),
-      getTokenPriceUSDById(ETH_TOKEN_ID, coinmarketcapApiKey),
-      client.readContract({
-        address: sourceTokenAddress,
-        abi: erc20Abi,
-        functionName: "decimals",
-      }),
-      client.readContract({
-        address: routerAddress,
-        abi: routerAbi,
-        functionName: "getFee",
-        args: [destinationChainSelector, message],
-      }),
-    ]);
+  const [
+    tokenPrice,
+    ethPrice,
+    sourceTokenDecimals,
+    ccipFee,
+    orchestratorEthBalance,
+  ] = await Promise.all([
+    getTokenPriceUSDById(tokenId, coinmarketcapApiKey),
+    getTokenPriceUSDById(ETH_TOKEN_ID, coinmarketcapApiKey),
+    client.readContract({
+      address: sourceTokenAddress,
+      abi: erc20Abi,
+      functionName: "decimals",
+    }),
+    client.readContract({
+      address: routerAddress,
+      abi: routerAbi,
+      functionName: "getFee",
+      args: [destinationChainSelector, message],
+    }),
+    client.getBalance({
+      address: orchestratorAddress,
+    }),
+  ]);
 
-  const tokensNeeded = calculateTokenAmount(
-    formatEther(ccipFeeAmount as unknown as bigint),
-    ethPrice.toString(),
-    tokenPrice.toString()
-  );
+  const ccipFeeAmountInEth = ccipFee as unknown as bigint;
 
-  let tokenFees = parseUnits(tokensNeeded, sourceTokenDecimals);
-  tokenFees = (tokenFees * 105n) / 100n; // 5% buffer for slippage consideration
+  // If there is not enough ETH for CCIP fees ? Token swap will be done to get the eth for CCIP fees
+  const isCCIPFeeSwapRequired = orchestratorEthBalance < ccipFeeAmountInEth;
 
-  // ————— Build token swap to pay for CCIP fees —————
-  const swapFlow = {
-    type: "/instructions/intent-simple",
-    data: {
-      srcChainId: sourceChainId,
-      dstChainId: sourceChainId,
-      srcToken: sourceTokenAddress, // USDC
-      dstToken: zeroAddress, // ETH
-      amount: tokenFees,
-      slippage: 0.01,
-    },
-  };
+  let swapFlow;
+  let ccipTokenFees = 0n;
+
+  if (isCCIPFeeSwapRequired) {
+    // If there is any leftover funds, this will reuse those funds for CCIP fees
+    const requiredEthFees = ccipFeeAmountInEth - orchestratorEthBalance;
+
+    const tokensNeeded = calculateTokenAmount(
+      formatEther(requiredEthFees),
+      ethPrice.toString(),
+      tokenPrice.toString()
+    );
+
+    ccipTokenFees = parseUnits(tokensNeeded, sourceTokenDecimals);
+    ccipTokenFees = (ccipTokenFees * 105n) / 100n; // 5% buffer for slippage consideration
+
+    // ————— Build token swap to pay for CCIP fees —————
+    swapFlow = {
+      type: "/instructions/intent-simple",
+      data: {
+        srcChainId: sourceChainId,
+        dstChainId: sourceChainId,
+        srcToken: sourceTokenAddress, // USDC
+        dstToken: zeroAddress, // ETH
+        amount: ccipTokenFees,
+        slippage: 0.01,
+      },
+    };
+  }
 
   // ————— Build token approval for CCIP router —————
   const approvalFlow = {
@@ -153,7 +177,7 @@ const main = async () => {
       ],
       to: routerAddress,
       chainId: sourceChainId,
-      value: ccipFeeAmount,
+      value: ccipFeeAmountInEth,
     },
   };
 
@@ -162,7 +186,14 @@ const main = async () => {
     type: "/instructions/build",
     data: {
       functionSignature: "function transfer(address to, uint256 value)",
-      args: [account.address, destinationTokenAmount],
+      args: [
+        account.address,
+        {
+          type: "runtimeErc20Balance",
+          tokenAddress: destinationTokenAddress,
+          constraints: { gte: minimumExpectedDestinationTokenAmount },
+        },
+      ],
       to: destinationTokenAddress,
       chainId: destinationChainId,
     },
@@ -176,7 +207,7 @@ const main = async () => {
       {
         tokenAddress: sourceTokenAddress,
         chainId: sourceChainId,
-        amount: sourceTokenAmount + tokenFees,
+        amount: sourceTokenAmount + ccipTokenFees, // If no swap required, ccipTokenFees will be zero here
       },
     ],
     feeToken: {
@@ -185,7 +216,9 @@ const main = async () => {
       gasRefundAddress: account.address,
     },
     upperBoundTimestamp: extendedUpperBoundTimestamp,
-    composeFlows: [swapFlow, approvalFlow, sendCCIPFlow, withdrawFlow],
+    composeFlows: swapFlow
+      ? [swapFlow, approvalFlow, sendCCIPFlow, withdrawFlow]
+      : [approvalFlow, sendCCIPFlow, withdrawFlow],
   };
 
   const quoteResponse = await fetch("https://api.biconomy.io/v1/quote", {
@@ -237,14 +270,22 @@ const main = async () => {
   });
 
   // ————— View status in MEE explorer —————
-  const { supertxHash } = await executeResponse.json();
+  const {
+    supertxHash,
+    code,
+    message: errorMessage,
+  } = await executeResponse.json();
+
+  if (code === 400) {
+    throw new Error(errorMessage);
+  }
 
   console.log(
     "Supertransaction link: ",
     `https://meescan.biconomy.io/details/${supertxHash}`
   );
 
-  let finaliedUserOps;
+  let ccipExplorerLinkPrinted = false;
 
   while (true) {
     const explorerResponse = await fetch(
@@ -260,6 +301,19 @@ const main = async () => {
 
     const { userOps } = await explorerResponse.json();
 
+    if (
+      userOps[1].executionStatus === "MINED_SUCCESS" &&
+      !ccipExplorerLinkPrinted
+    ) {
+      // ————— View CCIP status in CCIP explorer —————
+      console.log(
+        "CCIP explorer link: ",
+        `https://ccip.chain.link/tx/${userOps[1].executionData}`
+      );
+
+      ccipExplorerLinkPrinted = true;
+    }
+
     const isStxFinalized = userOps.every((userOp) =>
       ["MINED_FAIL", "FAILED", "MINED_SUCCESS"].includes(userOp.executionStatus)
     );
@@ -268,16 +322,11 @@ const main = async () => {
     await sleep(1000);
 
     if (isStxFinalized) {
-      finaliedUserOps = userOps;
       break;
     }
   }
 
-  // ————— View CCIP status in CCIP explorer —————
-  console.log(
-    "CCIP explorer link: ",
-    `https://ccip.chain.link/tx/${finaliedUserOps[1].executionData}`
-  );
+  console.log("Supertransaction execution has been completed");
 };
 
 main().catch((err) => {
