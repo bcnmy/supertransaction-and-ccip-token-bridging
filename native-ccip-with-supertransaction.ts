@@ -112,7 +112,12 @@ const main = async () => {
   for (let i = 0; i < quote.payloadToSign.length; i++) {
     let signature = "0x";
 
-    if (quote.quoteType === "permit") {
+    if (quote.quoteType === "simple") {
+      signature = await client.signMessage({
+        ...quote.payloadToSign[0],
+        account
+      });
+    } else if (quote.quoteType === "permit") {
       signature = await client.signTypedData({
         ...quote.payloadToSign[0].signablePayload,
         account,
