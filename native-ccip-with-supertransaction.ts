@@ -34,7 +34,6 @@ const sourceTokenAmount = parseUnits("0.1", 6); // amount to send with 6 decimal
 
 // ————— Destination Token config —————
 const destinationTokenAddress = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"; // USDC token
-const minimumExpectedDestinationTokenAmount = parseUnits("0.1", 6); // amount to send with 6 decimals for USDC token
 
 // ————— Client config —————
 const client = createWalletClient({
@@ -46,6 +45,8 @@ const client = createWalletClient({
 const sleep = (ms: number) => {
   return new Promise((resolve) => setTimeout(resolve, ms));
 };
+
+const extendedUpperBoundTimestamp = Math.floor(Date.now() / 1000) + 22 * 60; // 22 minutes execution window time to handle the large CCIP finality
 
 const main = async () => {
   // ————— Build token withdrawal to EOA on destination chain —————
@@ -70,7 +71,7 @@ const main = async () => {
         {
           type: "runtimeErc20Balance",
           tokenAddress: destinationTokenAddress,
-          constraints: { gte: minimumExpectedDestinationTokenAmount },
+          constraints: { gte: 1n },
         },
       ],
       to: destinationTokenAddress,
@@ -94,6 +95,7 @@ const main = async () => {
       chainId: sourceChainId,
       gasRefundAddress: account.address,
     },
+    upperBoundTimestamp: extendedUpperBoundTimestamp,
     composeFlows: [ccipFlow, withdrawFlow],
   };
 
@@ -107,6 +109,10 @@ const main = async () => {
   });
 
   const quote = await quoteResponse.json();
+
+  if (quote.code === 400) {
+    throw new Error(`Failed to fetch quote. Error: ${quote.message}`);
+  }
 
   // ————— Sign the quote —————
   for (let i = 0; i < quote.payloadToSign.length; i++) {
