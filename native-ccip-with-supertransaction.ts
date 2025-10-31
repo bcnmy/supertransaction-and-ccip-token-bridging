@@ -49,7 +49,7 @@ const sleep = (ms: number) => {
 const extendedUpperBoundTimestamp = Math.floor(Date.now() / 1000) + 22 * 60; // 22 minutes execution window time to handle the large CCIP finality
 
 const main = async () => {
-  // ————— Build token withdrawal to EOA on destination chain —————
+  // ————— Build CCIP token bridging —————
   const ccipFlow = {
     type: "/instructions/build-ccip",
     data: {
