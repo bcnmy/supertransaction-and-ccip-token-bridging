@@ -30,7 +30,7 @@ const destinationChainId = destinationChain.id;
 
 // ————— Source Token config —————
 const sourceTokenAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // USDC token
-const sourceTokenAmount = parseUnits("0.1", 6); // amount to send with 6 decimals for USDC token
+const sourceTokenAmount = parseUnits("0.5", 6); // amount to send with 6 decimals for USDC token
 
 // ————— Destination Token config —————
 const destinationTokenAddress = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"; // USDC token
