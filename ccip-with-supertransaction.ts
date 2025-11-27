@@ -196,6 +196,8 @@ const main = async () => {
       ],
       to: destinationTokenAddress,
       chainId: destinationChainId,
+      // Instruction level timebounds
+      upperBoundTimestamp: extendedUpperBoundTimestamp,
     },
   };
 
@@ -215,7 +217,6 @@ const main = async () => {
       chainId: sourceChainId,
       gasRefundAddress: account.address,
     },
-    upperBoundTimestamp: extendedUpperBoundTimestamp,
     composeFlows: swapFlow
       ? [swapFlow, approvalFlow, sendCCIPFlow, withdrawFlow]
       : [approvalFlow, sendCCIPFlow, withdrawFlow],
